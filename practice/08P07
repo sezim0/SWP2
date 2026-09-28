@@ -1,0 +1,200 @@
+// ============================================================
+// 08P07 - Ultrasonic Sensor + LED Brightness Control
+//
+// Distance range:
+//   100 mm -> minimum brightness
+//   150 mm -> 50% brightness
+//   200 mm -> maximum brightness
+//   250 mm -> 50% brightness
+//   300 mm -> minimum brightness
+//
+// IMPORTANT:
+// This course circuit uses an active-low LED:
+//   analogWrite(PIN_LED, 0)   -> brightest
+//   analogWrite(PIN_LED, 255) -> OFF
+// ============================================================
+
+
+// ------------------------------------------------------------
+// Arduino pin assignment
+// ------------------------------------------------------------
+#define PIN_LED  9
+#define PIN_TRIG 12
+#define PIN_ECHO 13
+
+
+// ------------------------------------------------------------
+// Configurable parameters
+// ------------------------------------------------------------
+#define SND_VEL 346.0          // Sound velocity at 24 °C, m/s
+#define INTERVAL 25UL          // Sampling interval: 25 ms
+#define PULSE_DURATION 10      // Trigger pulse duration: 10 us
+
+#define _DIST_MIN 100.0        // Minimum target distance: 100 mm
+#define _DIST_MID 200.0        // Maximum LED brightness point: 200 mm
+#define _DIST_MAX 300.0        // Maximum target distance: 300 mm
+
+#define TIMEOUT 30000UL        // Echo waiting timeout: 30 ms
+#define SCALE (0.001 * 0.5 * SND_VEL)
+
+unsigned long last_sampling_time = 0;
+
+
+// ------------------------------------------------------------
+// USS_measure()
+// Sends a trigger pulse and returns ultrasonic distance in mm.
+//
+// Returns 0.0 if no echo is received before timeout.
+// ------------------------------------------------------------
+float USS_measure(int TRIG, int ECHO) {
+  unsigned long duration_us;
+
+  // Ensure trigger starts LOW.
+  digitalWrite(TRIG, LOW);
+  delayMicroseconds(2);
+
+  // Send a 10-microsecond trigger pulse.
+  digitalWrite(TRIG, HIGH);
+  delayMicroseconds(PULSE_DURATION);
+  digitalWrite(TRIG, LOW);
+
+  // Read HIGH pulse duration from ECHO pin.
+  duration_us = pulseIn(ECHO, HIGH, TIMEOUT);
+
+  // pulseIn returns 0 if the echo was not received in time.
+  if (duration_us == 0) {
+    return 0.0;
+  }
+
+  // Convert round-trip echo duration into one-way distance in mm.
+  return duration_us * SCALE;
+}
+
+
+// ------------------------------------------------------------
+// getPWMValue()
+// Converts distance (100 to 300 mm) to PWM output.
+//
+// Active-low LED:
+// - At 200 mm: PWM = 0   -> maximum brightness
+// - At 100/300 mm: PWM = 255 -> minimum brightness / off
+// ------------------------------------------------------------
+int getPWMValue(float distance) {
+  float difference;
+  int pwm_value;
+
+  // Keep distance within the intended range for calculation.
+  if (distance < _DIST_MIN) {
+    distance = _DIST_MIN;
+  }
+  else if (distance > _DIST_MAX) {
+    distance = _DIST_MAX;
+  }
+
+  // Distance from the brightest location: 200 mm.
+  difference = abs(distance - _DIST_MID);
+
+  // difference range: 0 to 100 mm
+  // PWM range: 0 to 255
+  //
+  // distance = 200 -> difference = 0   -> pwm = 0   -> brightest
+  // distance = 150 -> difference = 50  -> pwm ≈ 127 -> 50%
+  // distance = 100 -> difference = 100 -> pwm = 255 -> minimum/off
+  pwm_value = (int)(difference * 255.0 / 100.0);
+
+  // Safety range check.
+  if (pwm_value < 0) {
+    pwm_value = 0;
+  }
+  else if (pwm_value > 255) {
+    pwm_value = 255;
+  }
+
+  return pwm_value;
+}
+
+
+// ------------------------------------------------------------
+// setup()
+// Runs once when Arduino starts.
+// ------------------------------------------------------------
+void setup() {
+  pinMode(PIN_LED, OUTPUT);
+  pinMode(PIN_TRIG, OUTPUT);
+  pinMode(PIN_ECHO, INPUT);
+
+  // Stop the sensor trigger signal initially.
+  digitalWrite(PIN_TRIG, LOW);
+
+  // Active-low LED: 255 means off.
+  analogWrite(PIN_LED, 255);
+
+  // Serial Plotter communication speed.
+  Serial.begin(57600);
+
+  last_sampling_time = millis();
+}
+
+
+// ------------------------------------------------------------
+// loop()
+// Runs repeatedly.
+// ------------------------------------------------------------
+void loop() {
+  float distance;
+  float plotted_distance;
+  int pwm_value;
+
+  // Wait until 25 ms have passed.
+  // No delay(50) is used.
+  if (millis() - last_sampling_time < INTERVAL) {
+    return;
+  }
+
+  // Advance the fixed sampling schedule.
+  last_sampling_time += INTERVAL;
+
+  // Measure distance in mm.
+  distance = USS_measure(PIN_TRIG, PIN_ECHO);
+
+  // ----------------------------------------------------------
+  // Handle invalid or out-of-range distance values.
+  // ----------------------------------------------------------
+  if (distance == 0.0) {
+    // No echo received: LED off and graph slightly above max.
+    analogWrite(PIN_LED, 255);
+    plotted_distance = _DIST_MAX + 10.0;
+  }
+  else if (distance < _DIST_MIN) {
+    // Too close: LED minimum brightness.
+    analogWrite(PIN_LED, 255);
+    plotted_distance = _DIST_MIN - 10.0;
+  }
+  else if (distance > _DIST_MAX) {
+    // Too far: LED minimum brightness.
+    analogWrite(PIN_LED, 255);
+    plotted_distance = _DIST_MAX + 10.0;
+  }
+  else {
+    // Valid distance: calculate LED brightness.
+    pwm_value = getPWMValue(distance);
+
+    // Active-low PWM LED control.
+    analogWrite(PIN_LED, pwm_value);
+
+    plotted_distance = distance;
+  }
+
+  // ----------------------------------------------------------
+  // Print values for Arduino Serial Plotter.
+  // It should show Min, distance, and Max lines.
+  // ----------------------------------------------------------
+  Serial.print("Min:");
+  Serial.print(_DIST_MIN);
+
+  Serial.print(",distance:");
+  Serial.print(plotted_distance);
+
+  Serial.print(",Max:");
+  Serial.println(_DIST_MAX);
+}
