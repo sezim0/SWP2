@@ -1,0 +1,181 @@
+#include <Servo.h>
+#include <math.h>
+
+// Parking Barrier Challenge 10C16
+// Hardware assumptions from the lecture slide:
+// - Servo signal wire on Arduino digital pin 10
+// - HC-SR04 trigger on pin 13, echo on pin 12
+// Change these constants if your actual wiring is different.
+
+const int PIN_SERVO = 10;
+const int PIN_TRIG = 13;
+const int PIN_ECHO = 12;
+
+const int CLOSED_ANGLE = 10;       // Barrier down. Calibrate for your build.
+const int OPEN_ANGLE = 90;         // Barrier up. Calibrate for your build.
+const unsigned long MOVE_TIME = 2500; 
+const unsigned long CLOSE_DELAY = 1500;
+
+const float OPEN_DISTANCE_CM = 12.0;
+const float CLEAR_DISTANCE_CM = 18.0;
+const unsigned long ECHO_TIMEOUT_US = 30000UL;
+
+enum EasingMode {
+  EASE_SIGMOID,
+  EASE_SMOOTHSTEP
+};
+
+// Required comparison:
+// - Use EASE_SIGMOID for the sigmoid function.
+// - Use EASE_SMOOTHSTEP for the second smooth-control function.
+const EasingMode EASING_MODE = EASE_SIGMOID;
+
+Servo barrierServo;
+
+bool barrierOpen = false;
+int currentAngle = CLOSED_ANGLE;
+unsigned long lastCarSeenTime = 0;
+
+float clamp01(float value) {
+  if (value < 0.0) {
+    return 0.0;
+  }
+  if (value > 1.0) {
+    return 1.0;
+  }
+  return value;
+}
+
+float easeSigmoid(float t) {
+  t = clamp01(t);
+
+  const float k = 12.0;
+  float y = 1.0 / (1.0 + exp(-k * (t - 0.5)));
+
+  // Normalize so t=0 maps exactly to 0 and t=1 maps exactly to 1.
+  float y0 = 1.0 / (1.0 + exp(k * 0.5));
+  float y1 = 1.0 / (1.0 + exp(-k * 0.5));
+  return (y - y0) / (y1 - y0);
+}
+
+float easeSmoothstep(float t) {
+  t = clamp01(t);
+  return t * t * (3.0 - 2.0 * t);
+}
+
+float easeValue(float t) {
+  if (EASING_MODE == EASE_SIGMOID) {
+    return easeSigmoid(t);
+  }
+  return easeSmoothstep(t);
+}
+
+float readDistanceOnceCm() {
+  digitalWrite(PIN_TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(PIN_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(PIN_TRIG, LOW);
+
+  unsigned long duration = pulseIn(PIN_ECHO, HIGH, ECHO_TIMEOUT_US);
+  if (duration == 0) {
+    return -1.0;
+  }
+
+  return duration * 0.0343 / 2.0;
+}
+
+float readDistanceCm() {
+  float sum = 0.0;
+  int validCount = 0;
+
+  for (int i = 0; i < 5; i++) {
+    float distance = readDistanceOnceCm();
+    if (distance >= 2.0 && distance <= 400.0) {
+      sum += distance;
+      validCount++;
+    }
+    delay(10);
+  }
+
+  if (validCount == 0) {
+    return -1.0;
+  }
+  return sum / validCount;
+}
+
+void moveBarrier(int fromAngle, int toAngle, unsigned long durationMs) {
+  unsigned long startTime = millis();
+
+  while (true) {
+    unsigned long elapsed = millis() - startTime;
+    float t = elapsed / (float)durationMs;
+
+    if (t >= 1.0) {
+      break;
+    }
+
+    float eased = easeValue(t);
+    int angle = fromAngle + (int)((toAngle - fromAngle) * eased + 0.5);
+    barrierServo.write(angle);
+    delay(20);
+  }
+
+  barrierServo.write(toAngle);
+  currentAngle = toAngle;
+}
+
+void openBarrier() {
+  moveBarrier(currentAngle, OPEN_ANGLE, MOVE_TIME);
+  barrierOpen = true;
+}
+
+void closeBarrier() {
+  moveBarrier(currentAngle, CLOSED_ANGLE, MOVE_TIME);
+  barrierOpen = false;
+}
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(PIN_TRIG, OUTPUT);
+  pinMode(PIN_ECHO, INPUT);
+
+  barrierServo.attach(PIN_SERVO);
+  barrierServo.write(CLOSED_ANGLE);
+  currentAngle = CLOSED_ANGLE;
+  delay(1000);
+
+  Serial.println("Parking barrier ready.");
+  if (EASING_MODE == EASE_SIGMOID) {
+    Serial.println("Easing mode: sigmoid");
+  } else {
+    Serial.println("Easing mode: smoothstep");
+  }
+}
+
+void loop() {
+  float distance = readDistanceCm();
+  unsigned long now = millis();
+
+  bool carDetected = distance > 0.0 && distance <= OPEN_DISTANCE_CM;
+  bool pathClear = distance < 0.0 || distance >= CLEAR_DISTANCE_CM;
+
+  Serial.print("distance_cm=");
+  Serial.print(distance);
+  Serial.print(" barrier_open=");
+  Serial.println(barrierOpen ? "yes" : "no");
+
+  if (carDetected) {
+    lastCarSeenTime = now;
+    if (!barrierOpen) {
+      openBarrier();
+    }
+  }
+
+  if (barrierOpen && pathClear && now - lastCarSeenTime >= CLOSE_DELAY) {
+    closeBarrier();
+  }
+
+  delay(100);
+}
